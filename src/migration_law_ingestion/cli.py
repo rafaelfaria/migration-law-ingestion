@@ -61,10 +61,10 @@ def _archive_document(archive: RawArchive, title_id: str, version_id: str, docum
     )
 
 
-def _base_graph(title: dict[str, Any], version: dict[str, Any], source: SourceTitle, provenance: Provenance) -> Graph:
+def _base_graph(title: dict[str, Any], version: dict[str, Any], source: SourceTitle, provenance: Provenance, canonical_version_id: str | None = None) -> Graph:
     graph = Graph()
     title_node = f"title:{source.title_id}"
-    version_id = version.get("registerId") or f"as-at:{version.get('start', 'unknown')}"
+    version_id = canonical_version_id or version.get("registerId") or _point_in_time_id(version)
     version_node = f"version:{source.title_id}:{version_id}"
     labels = ("LegislationTitle",) + (("LegislativeInstrument",) if source.kind == "LegislativeInstrument" else ())
     graph.add_node(Node(title_node, labels, {"title_id": source.title_id, "name": title.get("name"), "collection": title.get("collection"), "register_status": title.get("status")}, provenance))
@@ -76,7 +76,9 @@ def _base_graph(title: dict[str, Any], version: dict[str, Any], source: SourceTi
         if amendment_title:
             amendment = f"title:{amendment_title}"
             graph.add_node(Node(amendment, ("LegislationTitle",), {"title_id": amendment_title, "name": affected.get("name")}, provenance))
-            graph.add_relationship(Relationship(f"rel:AMENDED_BY:{version_node}:{amendment}", "AMENDED_BY", version_node, amendment, {"provisions": affected.get("provisions")}, provenance))
+            provisions = affected.get("provisions")
+            reason_key = hashlib.sha256(json.dumps(provisions, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+            graph.add_relationship(Relationship(f"rel:AMENDED_BY:{version_node}:{amendment}:{reason_key}", "AMENDED_BY", version_node, amendment, {"provisions": provisions}, provenance))
     return graph
 
 
@@ -124,6 +126,47 @@ def _link_known_predecessor(graph: Graph, archive: RawArchive, source: SourceTit
     graph.add_relationship(Relationship(f"rel:SUPERSEDED_BY:{previous_node}:version:{source.title_id}:{version_id}", "SUPERSEDED_BY", previous_node, f"version:{source.title_id}:{version_id}", {}, Provenance(source.title_id, version_id, provenance.source_document, provenance.source_location, "version interval order", provenance.effective_from, provenance.effective_to, provenance.retrieved_at, provenance.source_hash, "0.1.0", "version-interval-order-v1", 0.95)))
 
 
+def _point_in_time_id(version: dict[str, Any]) -> str:
+    """Stable identity for a Register interval that has no Register ID."""
+    start = version.get("start")
+    if not start:
+        raise ValueError("Register version row has neither registerId nor start")
+    return f"as-at-{start[:10]}"
+
+
+def ingest_version_metadata(
+    archive: RawArchive,
+    source: SourceTitle,
+    title: dict[str, Any],
+    title_url: str,
+    version: dict[str, Any],
+    version_url: str,
+) -> IngestResult:
+    """Persist a legacy Register point-in-time row where no source document exists."""
+    version_id = _point_in_time_id(version)
+    title_archive = archive.store_json(source.title_id, version_id, "title", title, title_url)
+    version_archive = archive.store_json(source.title_id, version_id, "version", version, version_url)
+    provenance = Provenance(
+        source.title_id,
+        version_id,
+        "version.json",
+        str(version_archive.path),
+        "",
+        version.get("start"),
+        version.get("end"),
+        version_archive.retrieved_at,
+        version_archive.sha256,
+        "0.1.0",
+        "register-version-metadata-only",
+        1.0,
+    )
+    graph = _base_graph(title, version, source, provenance, canonical_version_id=version_id)
+    _add_authority(graph, source, title, provenance)
+    _link_known_predecessor(graph, archive, source, version, version_id, provenance)
+    archive.write_manifest(source.title_id, version_id, [title_archive, version_archive])
+    return IngestResult(source, version_id, graph, not (title_archive.reused and version_archive.reused))
+
+
 def ingest_title(
     client: RegisterApiClient,
     archive: RawArchive,
@@ -131,12 +174,17 @@ def ingest_title(
     as_at: date | None,
     include_pdf: bool,
     register_id: str | None = None,
+    title_payload: dict[str, Any] | None = None,
+    title_url: str | None = None,
 ) -> IngestResult:
     """Archive exactly the version selected by the Register and produce its graph."""
-    title, title_url = client.get_title(source.title_id, include_authority=True)
+    if title_payload is None or title_url is None:
+        title, resolved_title_url = client.get_title(source.title_id, include_authority=True)
+    else:
+        title, resolved_title_url = title_payload, title_url
     version, version_url = client.get_version_by_register_id(register_id) if register_id else client.get_version(source.title_id, as_at)
     version_id = version.get("registerId") or f"as-at-{as_at.isoformat()}"
-    title_archive = archive.store_json(source.title_id, version_id, "title", title, title_url)
+    title_archive = archive.store_json(source.title_id, version_id, "title", title, resolved_title_url)
     version_archive = archive.store_json(source.title_id, version_id, "version", version, version_url)
     changed = not (title_archive.reused and version_archive.reused)
     entries = [title_archive, version_archive]
@@ -184,9 +232,17 @@ def ingest_title(
     return IngestResult(source, version_id, graph, changed)
 
 
-def discover_migration_instruments(client: RegisterApiClient, limit: int | None = None) -> list[SourceTitle]:
-    """Discover only candidate instruments authorised by the Act or Regulations."""
-    candidates, _ = client.list_in_force_migration_titles()
+def discover_migration_instruments(client: RegisterApiClient, limit: int | None = None, include_not_in_force: bool = False) -> list[SourceTitle]:
+    """Discover principal Migration instruments authorised by the Act or Regulations.
+
+    The daily catalogue intentionally uses current instruments only. Historical
+    backfill opts into the full Register catalogue so former instruments remain
+    part of the legal record.
+    """
+    if include_not_in_force:
+        candidates, _ = client.list_migration_titles(in_force_only=False)
+    else:
+        candidates, _ = client.list_in_force_migration_titles()
     instruments = []
     for candidate in candidates:
         if (
@@ -208,6 +264,18 @@ def baseline_sources(client: RegisterApiClient, include_instruments: bool, instr
     sources = [SourceTitle(MIGRATION_ACT_TITLE_ID, "Act", "Migration Act 1958"), SourceTitle(MIGRATION_REGULATIONS_TITLE_ID, "Regulations", "Migration Regulations 1994")]
     if include_instruments:
         sources.extend(discover_migration_instruments(client, instrument_limit))
+    return sources
+
+
+def historical_sources(client: RegisterApiClient, instrument_limit: int | None) -> list[SourceTitle]:
+    """Full Phase 1 source catalogue, including former principal instruments."""
+    sources = [
+        SourceTitle(MIGRATION_ACT_TITLE_ID, "Act", "Migration Act 1958"),
+        SourceTitle(MIGRATION_REGULATIONS_TITLE_ID, "Regulations", "Migration Regulations 1994"),
+    ]
+    if instrument_limit == 0:
+        return sources
+    sources.extend(discover_migration_instruments(client, instrument_limit, include_not_in_force=True))
     return sources
 
 
@@ -245,16 +313,18 @@ def backfill_title(
     skip_pdf: bool = False,
     neo4j: bool = False,
     request_interval: float = 0.75,
+    client: RegisterApiClient | None = None,
 ) -> list[IngestResult]:
     """Backfill Register versions without pretending a later compilation is historical text."""
-    client = RegisterApiClient(request_interval_seconds=request_interval)
+    client = client or RegisterApiClient(request_interval_seconds=request_interval)
     archive = RawArchive(archive_root)
     kind = source_kind or ("Act" if title_id == MIGRATION_ACT_TITLE_ID else "Regulations" if title_id == MIGRATION_REGULATIONS_TITLE_ID else "LegislativeInstrument")
     source = SourceTitle(title_id, kind)
+    title, title_url = client.get_title(title_id, include_authority=True)
     versions = client.list_versions(title_id)
     selected = [
         version for version in versions
-        if version.get("registerId")
+        if version.get("start")
         and (from_date is None or date.fromisoformat(version["start"][:10]) >= from_date)
         and (to_date is None or date.fromisoformat(version["start"][:10]) <= to_date)
     ]
@@ -263,7 +333,26 @@ def backfill_title(
     graph = Graph()
     results = []
     for version in selected:
-        result = ingest_title(client, archive, source, None, include_pdf=not skip_pdf, register_id=version["registerId"])
+        if version.get("registerId"):
+            result = ingest_title(
+                client,
+                archive,
+                source,
+                None,
+                include_pdf=not skip_pdf,
+                register_id=version["registerId"],
+                title_payload=title,
+                title_url=title_url,
+            )
+        else:
+            result = ingest_version_metadata(
+                archive,
+                source,
+                title,
+                title_url,
+                version,
+                f"register://Versions?titleId={title_id}&start={version['start']}",
+            )
         graph.merge(result.graph)
         results.append(result)
     graph.validate()
@@ -272,6 +361,60 @@ def backfill_title(
     if neo4j:
         write_graph_from_environment(graph)
     return results
+
+
+def backfill_baseline(
+    archive_root: Path,
+    output_root: Path,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    instrument_limit: int | None = None,
+    skip_pdf: bool = False,
+    neo4j: bool = False,
+    request_interval: float = 0.75,
+    reprocess_complete: bool = False,
+) -> list[dict[str, Any]]:
+    """Resumably materialise every historical version in the Phase 1 catalogue.
+
+    A completed title is checkpointed only after all of its Register versions are
+    archived and persisted. Re-running safely reuses immutable raw objects and
+    starts at the first unfinished title.
+    """
+    client = RegisterApiClient(request_interval_seconds=request_interval)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+    state_path = output_root / "backfill-state.json"
+    state: dict[str, Any] = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"completed_title_ids": []}
+    completed = set(state.get("completed_title_ids", []))
+    summaries: list[dict[str, Any]] = []
+    for source in historical_sources(client, instrument_limit):
+        if source.title_id in completed and not reprocess_complete:
+            summaries.append({"title_id": source.title_id, "status": "already-complete"})
+            continue
+        output = output_root / f"{source.title_id}.json"
+        results = backfill_title(
+            source.title_id,
+            archive_root,
+            output,
+            source_kind=source.kind,
+            from_date=from_date,
+            to_date=to_date,
+            skip_pdf=skip_pdf,
+            neo4j=neo4j,
+            request_interval=request_interval,
+            client=client,
+        )
+        summaries.append({"title_id": source.title_id, "kind": source.kind, "versions": len(results), "status": "complete"})
+        completed.add(source.title_id)
+        state = {
+            "completed_title_ids": sorted(completed),
+            "from_date": from_date.isoformat() if from_date else None,
+            "to_date": to_date.isoformat() if to_date else None,
+            "request_interval_seconds": request_interval,
+        }
+        state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(summaries[-1]), flush=True)
+    return summaries
 
 
 def ingest_regulations(as_at: date, archive_root: Path, output: Path, skip_pdf: bool = False, request_interval: float = 0.75) -> None:
@@ -331,6 +474,16 @@ def main() -> None:
     backfill.add_argument("--skip-pdf", action="store_true")
     backfill.add_argument("--neo4j", action="store_true")
     backfill.add_argument("--request-interval", type=float, default=0.75)
+    full_backfill = command.add_parser("backfill-baseline", help="resumably archive and parse the full historical Phase 1 source catalogue")
+    full_backfill.add_argument("--from-date", type=_as_date)
+    full_backfill.add_argument("--to-date", type=_as_date)
+    full_backfill.add_argument("--instrument-limit", type=int, default=None, help="cap historical instrument titles for a bounded development run")
+    full_backfill.add_argument("--archive-root", type=Path, default=Path("data/raw"))
+    full_backfill.add_argument("--output-root", type=Path, default=Path("data/backfill"))
+    full_backfill.add_argument("--skip-pdf", action="store_true")
+    full_backfill.add_argument("--neo4j", action="store_true")
+    full_backfill.add_argument("--request-interval", type=float, default=0.75)
+    full_backfill.add_argument("--reprocess-complete", action="store_true", help="re-run completed titles while reusing immutable source files")
     updates = command.add_parser("check-updates", help="report versions not yet present in the immutable archive")
     _add_common_arguments(updates, include_instruments=True)
     args = parser.parse_args()
@@ -344,6 +497,9 @@ def main() -> None:
     elif args.command == "backfill-title":
         results = backfill_title(args.title_id, args.archive_root, args.output, args.kind, args.from_date, args.to_date, args.version_limit, args.skip_pdf, args.neo4j, args.request_interval)
         print(json.dumps({"ingested": len(results), "changed": sum(result.changed for result in results)}, indent=2))
+    elif args.command == "backfill-baseline":
+        summaries = backfill_baseline(args.archive_root, args.output_root, args.from_date, args.to_date, args.instrument_limit, args.skip_pdf, args.neo4j, args.request_interval, args.reprocess_complete)
+        print(json.dumps({"titles": len(summaries), "completed": sum(item["status"] == "complete" for item in summaries)}, indent=2))
 
 
 if __name__ == "__main__":

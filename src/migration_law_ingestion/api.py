@@ -68,11 +68,40 @@ class RegisterApiClient:
         suffix = "?%24expand=AuthorisedBy" if include_authority else ""
         return self.get_json(f"Titles('{quote(title_id, safe='')}'){suffix}")
 
+    def list_migration_titles(
+        self,
+        in_force_only: bool = True,
+        page_size: int = 100,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Return every Register title whose name contains ``Migration``.
+
+        Register pagination is followed explicitly.  Historical backfill uses the
+        non-current catalogue so a repealed principal instrument is not silently
+        lost just because it is no longer in force today.
+        """
+        filters = ["contains(name, 'Migration')"]
+        if in_force_only:
+            filters.append("isInForce eq true")
+        filter_expression = " and ".join(filters)
+        titles: list[dict[str, Any]] = []
+        skip = 0
+        first_url = ""
+        expected_count: int | None = None
+        while True:
+            query = urlencode({"$filter": filter_expression, "$top": page_size, "$skip": skip})
+            payload, url = self.get_json(f"Titles?{query}")
+            first_url = first_url or url
+            if expected_count is None and isinstance(payload.get("@odata.count"), int):
+                expected_count = payload["@odata.count"]
+            page = list(payload.get("value", []))
+            titles.extend(page)
+            if not page or len(page) < page_size or (expected_count is not None and len(titles) >= expected_count):
+                return titles, first_url
+            skip += page_size
+
     def list_in_force_migration_titles(self) -> tuple[list[dict[str, Any]], str]:
-        """Return Register candidates using a documented OData query, not web search."""
-        query = urlencode({"$filter": "isInForce eq true and contains(name, 'Migration')"})
-        payload, url = self.get_json(f"Titles?{query}")
-        return list(payload.get("value", [])), url
+        """Compatibility wrapper for the current, daily-update source catalogue."""
+        return self.list_migration_titles(in_force_only=True)
 
     def get_version(self, title_id: str, as_at: date) -> tuple[dict[str, Any], str]:
         return self.get_json(f"versions/find(titleid='{quote(title_id, safe='')}',asat={as_at.isoformat()})")

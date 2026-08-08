@@ -131,3 +131,12 @@ cp .env.example .env
 The source archive and parser do not depend on these credentials. The writer uses
 allow-listed labels and relationship types, batching up to 500 graph records per
 Cypher transaction and storing provenance JSON on every persisted entity.
+
+## Operating the complete pipeline
+
+The current-source baseline is the daily operational graph. Run
+`backfill-baseline` once to materialise every historic Register version (including
+former authorised principal instruments) and resume safely after any interruption.
+For a persistent daily deployment, use the supplied Docker package and scheduler
+template. See [operations](docs/operations.md) for the exact commands and storage
+requirements.

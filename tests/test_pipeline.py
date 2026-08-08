@@ -13,7 +13,11 @@ from migration_law_ingestion.cli import (
     backfill_title,
     discover_migration_instruments,
     ingest_title,
+    historical_sources,
+    ingest_version_metadata,
 )
+from migration_law_ingestion.cli import _base_graph
+from migration_law_ingestion.model import Provenance
 
 
 def epub_bytes() -> bytes:
@@ -67,6 +71,22 @@ class BackfillClient(FakeClient):
         return DownloadedDocument(epub_bytes(), "application/epub+zip", f"{register_id}.epub", "https://example.test/document")
 
 
+def test_title_catalogue_follows_count_based_pagination(monkeypatch):
+    from migration_law_ingestion.api import RegisterApiClient
+
+    client = RegisterApiClient()
+    responses = [
+        ({"@odata.count": 3, "value": [{"id": "one"}, {"id": "two"}]}, "https://example.test/first"),
+        ({"@odata.count": 3, "value": [{"id": "three"}]}, "https://example.test/second"),
+    ]
+    monkeypatch.setattr(client, "get_json", lambda _: responses.pop(0))
+
+    titles, url = client.list_migration_titles(in_force_only=False, page_size=2)
+
+    assert [title["id"] for title in titles] == ["one", "two", "three"]
+    assert url == "https://example.test/first"
+
+
 def test_title_ingestion_reuses_archived_epub_without_a_second_download(tmp_path):
     client = FakeClient()
     archive = RawArchive(tmp_path / "raw")
@@ -83,6 +103,49 @@ def test_title_ingestion_reuses_archived_epub_without_a_second_download(tmp_path
 def test_instrument_discovery_keeps_only_current_principal_instruments():
     instruments = discover_migration_instruments(FakeClient())
     assert instruments == [SourceTitle("F2026L00001", "LegislativeInstrument", "Migration Test Instrument")]
+
+
+def test_historical_catalogue_can_start_with_the_two_root_laws_without_discovery():
+    assert historical_sources(FakeClient(), instrument_limit=0) == [
+        SourceTitle(MIGRATION_ACT_TITLE_ID, "Act", "Migration Act 1958"),
+        SourceTitle(MIGRATION_REGULATIONS_TITLE_ID, "Regulations", "Migration Regulations 1994"),
+    ]
+
+
+def test_multiple_amendment_reasons_from_one_title_remain_distinct():
+    source = SourceTitle("T", "Act")
+    provenance = Provenance("T", "V", "version.json", "test", "", None, None, "2026-01-01T00:00:00Z", "hash", "test", "test", 1.0)
+    graph = _base_graph(
+        {"name": "Test"},
+        {
+            "registerId": "V",
+            "reasons": [
+                {"affectedByTitle": {"titleId": "A", "provisions": "item 1"}},
+                {"affectedByTitle": {"titleId": "A", "provisions": "item 2"}},
+            ],
+        },
+        source,
+        provenance,
+    )
+
+    assert sum(rel.type == "AMENDED_BY" for rel in graph.relationships.values()) == 2
+
+
+def test_historical_row_without_register_id_is_retained_as_metadata(tmp_path):
+    archive = RawArchive(tmp_path / "raw")
+    source = SourceTitle("T", "Act")
+    result = ingest_version_metadata(
+        archive,
+        source,
+        {"name": "Title T", "authorisedBy": []},
+        "https://example.test/title",
+        {"start": "1990-01-01T00:00:00", "end": "1990-02-01T00:00:00", "reasons": []},
+        "https://example.test/versions",
+    )
+
+    assert result.version_id == "as-at-1990-01-01"
+    version = result.graph.nodes["version:T:as-at-1990-01-01"]
+    assert version.provenance.extraction_method == "register-version-metadata-only"
 
 
 def test_newer_archived_version_is_linked_as_superseding_its_predecessor(tmp_path):

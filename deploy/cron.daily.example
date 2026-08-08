@@ -1,0 +1,4 @@
+# Install this on a host with Docker Compose, using the repository's absolute path.
+# The data directory must be on persistent storage; do not use an ephemeral runner.
+# Example: run every day at 02:15 local time.
+15 2 * * * cd /absolute/path/to/migration-law-ingestion && /usr/bin/docker compose run --rm ingestion python scripts/daily_ingestion.py --include-instruments --neo4j >> data/daily-ingestion.log 2>&1

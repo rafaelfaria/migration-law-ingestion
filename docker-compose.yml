@@ -1,0 +1,7 @@
+services:
+  ingestion:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    working_dir: /app

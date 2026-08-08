@@ -50,7 +50,9 @@ def test_neo4j_sink_upserts_allowlisted_labels_and_relationships():
 
     write_graph(driver, graph)
 
-    assert len(driver.calls) == 3
+    assert len(driver.calls) == 5
+    assert any("CREATE CONSTRAINT canonical_entity_id" in query for query, _ in driver.calls)
     assert any("LegislationTitle" in query for query, _ in driver.calls)
     assert any("HAS_VERSION" in query for query, _ in driver.calls)
-    assert all("provenance_json" in parameters["rows"][0]["properties"] for _, parameters in driver.calls)
+    row_writes = [parameters for _, parameters in driver.calls if "rows" in parameters]
+    assert all("provenance_json" in parameters["rows"][0]["properties"] for parameters in row_writes)

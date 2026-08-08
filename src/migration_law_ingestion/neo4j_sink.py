@@ -27,9 +27,24 @@ def _properties(item: Any) -> dict[str, Any]:
     return item.properties | {"provenance_json": json.dumps(asdict(item.provenance), sort_keys=True)}
 
 
+def ensure_schema(driver: Any, database: str | None = None) -> None:
+    """Give every canonical node a common indexed identity before an upsert.
+
+    The label is a persistence implementation detail; the legal node labels stay
+    exactly as emitted by the canonical model. The migration step is idempotent
+    and also upgrades graphs loaded by an earlier pipeline version.
+    """
+    with driver.session(database=database) as session:
+        session.execute_write(lambda tx: tx.run("MATCH (n) WHERE n.id IS NOT NULL SET n:Entity").consume())
+        session.execute_write(
+            lambda tx: tx.run("CREATE CONSTRAINT canonical_entity_id IF NOT EXISTS FOR (n:Entity) REQUIRE n.id IS UNIQUE").consume()
+        )
+
+
 def write_graph(driver: Any, graph: Graph, database: str | None = None) -> None:
     """Upsert graph data using only core Cypher; labels/types are allow-listed."""
     graph.validate()
+    ensure_schema(driver, database)
     with driver.session(database=database) as session:
         nodes_by_labels: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
         for node in graph.nodes.values():
@@ -39,7 +54,7 @@ def write_graph(driver: Any, graph: Graph, database: str | None = None) -> None:
             nodes_by_labels[tuple(sorted(labels))].append({"id": node.id, "properties": _properties(node)})
         for labels, rows in nodes_by_labels.items():
             label_clause = ":".join(labels)
-            query = f"UNWIND $rows AS row MERGE (n:{label_clause} {{id: row.id}}) SET n += row.properties"
+            query = f"UNWIND $rows AS row MERGE (n:Entity:{label_clause} {{id: row.id}}) SET n += row.properties"
             for start in range(0, len(rows), BATCH_SIZE):
                 session.execute_write(lambda tx, q=query, batch=rows[start:start + BATCH_SIZE]: tx.run(q, rows=batch).consume())
         relationships_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -49,7 +64,7 @@ def write_graph(driver: Any, graph: Graph, database: str | None = None) -> None:
             relationships_by_type[relationship.type].append({"id": relationship.id, "start_id": relationship.start_id, "end_id": relationship.end_id, "properties": _properties(relationship)})
         for relationship_type, rows in relationships_by_type.items():
             query = (
-                "UNWIND $rows AS row MATCH (source {id: row.start_id}) MATCH (target {id: row.end_id}) "
+                "UNWIND $rows AS row MATCH (source:Entity {id: row.start_id}) MATCH (target:Entity {id: row.end_id}) "
                 f"MERGE (source)-[rel:{relationship_type} {{id: row.id}}]->(target) SET rel += row.properties"
             )
             for start in range(0, len(rows), BATCH_SIZE):
