@@ -16,7 +16,7 @@ PARSER_VERSION = "0.1.0"
 SUBCLASS_RE = re.compile(r"^Subclass\s+(\d{3})\s*[—-]\s*(.+)$", re.I)
 ITEM_RE = re.compile(r"^(\d{4}[A-Z]?)\s+(.+?\(Class\s+[A-Z]{2}\))$", re.I)
 PROVISION_RE = re.compile(r"^(\d{3}\.\d+(?:[A-Z])?)$")
-SCHEDULE_RE = re.compile(r"^Schedule\s+([\dA-Z]+)", re.I)
+SCHEDULE_RE = re.compile(r"^Schedule(?:\s+([\dA-Z]+))?", re.I)
 PART_RE = re.compile(r"^Part\s+([\dA-Z]+)", re.I)
 DIVISION_RE = re.compile(r"^((?:Division\s+)?\d{3}\.\d+[A-Z]?)\s*[—-]\s*(.+)$", re.I)
 SUBDIVISION_RE = re.compile(r"^(\d{3}\.\d{2}[A-Z]?)\s*[—-]\s*(.+)$", re.I)
@@ -24,6 +24,10 @@ PIC_RE = re.compile(r"public interest criteria?\s+([\d,\s and]+)", re.I)
 SRC_RE = re.compile(r"special return criteria?\s+([\d,\s and]+)", re.I)
 CONDITION_RE = re.compile(r"(?:visa )?conditions?\s+([\d,\s and]+)", re.I)
 PROVISION_REFERENCE_RE = re.compile(r"(?:subclause|clause|regulation|section)\s+(\d{1,3}\.\d+(?:\(\d+\))?|\d+[A-Z]?)", re.I)
+GENERIC_PROVISION_RE = re.compile(r"^(\d+[A-Z]?(?:\([A-Z0-9]+\))?)\b")
+GENERIC_PART_RE = re.compile(r"^Part\s+([0-9A-Z]+)\s*[—-]\s*(.+)$", re.I)
+GENERIC_DIVISION_RE = re.compile(r"^Division\s+([0-9A-Z]+)\s*[—-]\s*(.+)$", re.I)
+GENERIC_SUBDIVISION_RE = re.compile(r"^Subdivision\s+([0-9A-Z]+)\s*[—-]\s*(.+)$", re.I)
 
 
 @dataclass(frozen=True)
@@ -135,7 +139,7 @@ class RegulationsParser:
             source = context.provenance(paragraph, "epub-html-structure-v1")
             schedule_match = SCHEDULE_RE.match(paragraph.text)
             if schedule_match and paragraph.css_class in {"ActHead1", "TOC1"}:
-                number = schedule_match.group(1)
+                number = schedule_match.group(1) or "unnumbered"
                 candidate = f"schedule:{title_id}:{version_id}:{number}"
                 # Table-of-contents nodes duplicate headings and have no legal text.
                 if paragraph.css_class == "ActHead1":
@@ -270,3 +274,90 @@ class RegulationsParser:
             target = f"instrument-hook:{context.title_id}:{context.version_id}:{provision_id}"
             self._node(graph, Node(target, ("LegislativeInstrument",), {"resolved": False, "hook_text": paragraph.text}, source))
             self._rel(graph, "SPECIFIED_BY", provision_id, target, source)
+
+
+class GenericLegislationParser(RegulationsParser):
+    """Extract ordinary Act/instrument structure from the Register EPUB layout."""
+
+    def parse_epub(
+        self,
+        epub: bytes,
+        *,
+        title_id: str,
+        version_id: str,
+        effective_from: str | None,
+        effective_to: str | None,
+        retrieved_at: str,
+        source_hash: str,
+    ) -> Graph:
+        context = _Context(title_id, version_id, effective_from, effective_to, retrieved_at, source_hash)
+        graph = Graph()
+        version_node = f"version:{title_id}:{version_id}"
+        self._node(graph, Node(version_node, ("LegislationVersion",), {"title_id": title_id, "register_id": version_id}, context.provenance(None, "register-version-json")))
+        schedule_id: str | None = None
+        part_id: str | None = None
+        division_id: str | None = None
+        subdivision_id: str | None = None
+        current_provision_id: str | None = None
+
+        for paragraph in extract_epub_paragraphs(epub):
+            source = context.provenance(paragraph, "epub-generic-structure-v1")
+            if paragraph.text == "Endnotes" or paragraph.css_class.lower().startswith("endnote"):
+                current_provision_id = None
+                continue
+            schedule_match = SCHEDULE_RE.match(paragraph.text)
+            if schedule_match and paragraph.css_class == "ActHead1":
+                number = schedule_match.group(1) or "unnumbered"
+                schedule_id = f"schedule:{title_id}:{version_id}:{number}"
+                self._node(graph, Node(schedule_id, ("Schedule",), {"number": number, "title": paragraph.text}, source))
+                self._rel(graph, "CONTAINS", version_node, schedule_id, source)
+                self._rel(graph, "PART_OF", schedule_id, version_node, source)
+                part_id = division_id = subdivision_id = None
+                current_provision_id = None
+                continue
+            part_match = GENERIC_PART_RE.match(paragraph.text)
+            if part_match and paragraph.css_class == "ActHead2":
+                number, title = part_match.groups()
+                part_id = f"part:{title_id}:{version_id}:{number}"
+                self._node(graph, Node(part_id, ("Part",), {"number": number, "title": title}, source))
+                parent = schedule_id or version_node
+                self._rel(graph, "CONTAINS", parent, part_id, source)
+                self._rel(graph, "PART_OF", part_id, parent, source)
+                division_id = subdivision_id = None
+                current_provision_id = None
+                continue
+            division_match = GENERIC_DIVISION_RE.match(paragraph.text)
+            if division_match and paragraph.css_class == "ActHead3":
+                number, title = division_match.groups()
+                division_id = f"division:{title_id}:{version_id}:{part_id or schedule_id}:{number}"
+                self._node(graph, Node(division_id, ("Division",), {"number": number, "title": title}, source))
+                parent = part_id or schedule_id or version_node
+                self._rel(graph, "CONTAINS", parent, division_id, source)
+                self._rel(graph, "PART_OF", division_id, parent, source)
+                subdivision_id = None
+                current_provision_id = None
+                continue
+            subdivision_match = GENERIC_SUBDIVISION_RE.match(paragraph.text)
+            if subdivision_match and paragraph.css_class == "ActHead4":
+                number, title = subdivision_match.groups()
+                subdivision_id = f"subdivision:{title_id}:{version_id}:{division_id or part_id}:{number}"
+                self._node(graph, Node(subdivision_id, ("Subdivision",), {"number": number, "title": title}, source))
+                parent = division_id or part_id or schedule_id or version_node
+                self._rel(graph, "CONTAINS", parent, subdivision_id, source)
+                self._rel(graph, "PART_OF", subdivision_id, parent, source)
+                current_provision_id = None
+                continue
+            provision_match = GENERIC_PROVISION_RE.match(paragraph.text)
+            if provision_match and paragraph.css_class == "ActHead5":
+                number = provision_match.group(1)
+                parent = subdivision_id or division_id or part_id or schedule_id or version_node
+                scope = hashlib.sha256(parent.encode()).hexdigest()[:12]
+                current_provision_id = f"provision:{title_id}:{version_id}:{scope}:{number}"
+                self._node(graph, Node(current_provision_id, ("Provision",), {"kind": "section_or_clause", "number": number, "title": paragraph.text, "structural_parent_id": parent}, source))
+                self._rel(graph, "CONTAINS", parent, current_provision_id, source)
+                self._rel(graph, "PART_OF", current_provision_id, parent, source)
+                continue
+            # Non-heading text belongs to the immediately preceding provision.
+            if current_provision_id:
+                self._extract_references(graph, current_provision_id, paragraph, context)
+        return graph

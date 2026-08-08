@@ -29,6 +29,11 @@ the Register title/version metadata and the primary EPUB and PDFs when published
 then writes a JSON graph. Re-running a download with identical bytes reuses the
 object; a different byte stream is stored under its different SHA-256 digest.
 
+The API client is deliberately rate-conscious: it makes one request at a time,
+waits at least 0.75 seconds between requests by default, and backs off/retries on
+429 and transient server errors. Increase the interval with `--request-interval`
+for a slower run.
+
 `--skip-pdf` is useful during parser development. The archive is deliberately
 separate from the graph so extraction can be reproduced from immutable inputs.
 
@@ -53,6 +58,15 @@ unchanged:
 
 ```bash
 .venv/bin/python scripts/daily_ingestion.py --include-instruments
+```
+
+Historical backfill is explicit and uses Register version IDs, never a later
+compilation substituted for historic text. Start with a bounded run:
+
+```bash
+.venv/bin/python -m migration_law_ingestion.cli backfill-title \
+  --title-id F1996B03551 --kind Regulations --version-limit 5 \
+  --skip-pdf --request-interval 0.75
 ```
 
 The product vision, ontology, relationship semantics, source architecture and
@@ -88,8 +102,28 @@ the normal test suite fast and offline.
 - `src/migration_law_ingestion/archive.py` — content-addressed raw archive
 - `src/migration_law_ingestion/parser.py` — EPUB structure and reference parser
 - `src/migration_law_ingestion/model.py` — portable canonical graph model
+- `src/migration_law_ingestion/neo4j_sink.py` — optional, batched Neo4j upsert
 - `tests/` — deterministic acceptance and archive tests
 
 Neo4j is an integration boundary, not a current prerequisite. A future sink can
 upsert the `Graph` nodes and relationships by their stable IDs without changing
 retrieval, archival, or extraction.
+
+## Optional Neo4j persistence
+
+The canonical JSON export is always written first. To also upsert the validated
+graph into Neo4j, install the optional dependency and provide connection variables:
+
+```bash
+.venv/bin/python -m pip install -e '.[neo4j]'
+export NEO4J_URI='neo4j+s://…'
+export NEO4J_USER='neo4j'
+export NEO4J_PASSWORD='…'
+# Optional: export NEO4J_DATABASE='neo4j'
+.venv/bin/python -m migration_law_ingestion.cli ingest-baseline \
+  --as-at 2026-08-08 --include-instruments --neo4j
+```
+
+The source archive and parser do not depend on these credentials. The writer uses
+allow-listed labels and relationship types, batching up to 500 graph records per
+Cypher transaction and storing provenance JSON on every persisted entity.

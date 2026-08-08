@@ -144,15 +144,30 @@ The runnable local equivalent of that loop is `scripts/daily_ingestion.py`. It i
 the artifact to place in a future scheduled container/job; its persistent
 `data/raw` path must then be mapped to durable object storage or a durable volume.
 
+Historical capture uses the Register version-list and register-ID document routes,
+so every archived EPUB/PDF is attached to its actual Register version. Backfills
+are explicit, rate-limited jobs; routine daily updates only ingest new/current
+versions.
+
 ### Instrument discovery boundary
 
-The Register does not expose an authority-filtered title list in the documented
-API surface used by this MVP. The initial deterministic discovery query selects
-in-force, principal `LegislativeInstrument` titles with names beginning
-`Migration`. This avoids unrelated uses of the word “migration” while keeping
-selection transparent and reproducible. Instrument hooks extracted from the
+The Register does not expose an authority-filtered title-list endpoint. Discovery
+therefore uses a deterministic two-step API process: find in-force, principal
+`LegislativeInstrument` titles whose names begin `Migration`, then retain only
+titles whose Register `authorisedBy` metadata identifies the Migration Act or
+Migration Regulations. This avoids unrelated uses of “migration” while keeping
+selection source-backed and reproducible. Instrument hooks extracted from the
 Regulations remain explicit unresolved nodes unless a matching registered title is
 ingested; they are never guessed.
+
+### Parser coverage
+
+The parser has two deterministic modes. The Migration Regulations mode understands
+Schedule 1 visa-class items, Schedule 2 subclasses and their grant/validity paths.
+The general mode extracts the Register EPUB hierarchy (`Schedule`, `Part`,
+`Division`, `Subdivision`, numbered provision) for the Migration Act and
+registered instruments, plus explicit citations and instrument hooks. Neither mode
+uses an LLM or turns ambiguous wording into an inferred legal relationship.
 
 This strategy favours completeness and reproducibility over premature incremental
 diffing. Once version ingestion is reliable, document-level hashes can avoid

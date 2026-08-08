@@ -73,6 +73,25 @@ class Graph:
         for relationship in other.relationships.values():
             self.relationships.setdefault(relationship.id, relationship)
 
+    def validate(self) -> None:
+        """Fail closed if a parser emits a graph that cannot be safely persisted."""
+        required_provenance = (
+            "source_title_id", "source_version_id", "source_document", "source_location",
+            "retrieved_at", "source_hash", "parser_version", "extraction_method", "confidence",
+        )
+        for node in self.nodes.values():
+            if not node.labels:
+                raise ValueError(f"node has no label: {node.id}")
+            for name in required_provenance:
+                if getattr(node.provenance, name) in (None, ""):
+                    raise ValueError(f"node missing provenance {name}: {node.id}")
+        for relationship in self.relationships.values():
+            if relationship.start_id not in self.nodes or relationship.end_id not in self.nodes:
+                raise ValueError(f"relationship endpoint missing: {relationship.id}")
+            for name in required_provenance:
+                if getattr(relationship.provenance, name) in (None, ""):
+                    raise ValueError(f"relationship missing provenance {name}: {relationship.id}")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "nodes": [asdict(node) for node in self.nodes.values()],

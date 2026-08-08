@@ -10,6 +10,7 @@ from migration_law_ingestion.cli import (
     MIGRATION_ACT_TITLE_ID,
     MIGRATION_REGULATIONS_TITLE_ID,
     SourceTitle,
+    backfill_title,
     discover_migration_instruments,
     ingest_title,
 )
@@ -27,7 +28,8 @@ class FakeClient:
         self.downloads = 0
 
     def get_title(self, title_id, include_authority=False):
-        return ({"id": title_id, "name": f"Title {title_id}", "collection": "Act", "status": "InForce", "authorisedBy": []}, f"https://example.test/titles/{title_id}")
+        authority = [{"affectingTitleId": MIGRATION_ACT_TITLE_ID}] if title_id == "F2026L00001" else []
+        return ({"id": title_id, "name": "Migration Test Instrument" if title_id == "F2026L00001" else f"Title {title_id}", "collection": "Act", "status": "InForce", "authorisedBy": authority}, f"https://example.test/titles/{title_id}")
 
     def get_version(self, title_id, as_at):
         return ({"registerId": f"{title_id}-v1", "start": "2026-01-01T00:00:00", "end": None, "documents": [{"type": "Primary", "format": "Epub", "volumeNumber": 0}], "reasons": []}, f"https://example.test/versions/{title_id}")
@@ -51,6 +53,18 @@ class VersioningClient(FakeClient):
 
     def get_version(self, title_id, as_at):
         return ({"registerId": f"{title_id}-v{self.version_number}", "start": f"2026-0{self.version_number}-01T00:00:00", "end": None, "documents": [{"type": "Primary", "format": "Epub", "volumeNumber": 0}], "reasons": []}, f"https://example.test/versions/{title_id}")
+
+
+class BackfillClient(FakeClient):
+    def list_versions(self, title_id):
+        return [{"registerId": "T-v1", "start": "2025-01-01T00:00:00"}, {"registerId": "T-v2", "start": "2026-01-01T00:00:00"}]
+
+    def get_version_by_register_id(self, register_id):
+        return ({"registerId": register_id, "start": "2025-01-01T00:00:00", "end": None, "documents": [{"type": "Primary", "format": "Epub", "volumeNumber": 0}], "reasons": []}, f"https://example.test/versions/{register_id}")
+
+    def download_primary_document_by_register_id(self, register_id, document_format, volume_number=0, unique_type_number=0):
+        self.downloads += 1
+        return DownloadedDocument(epub_bytes(), "application/epub+zip", f"{register_id}.epub", "https://example.test/document")
 
 
 def test_title_ingestion_reuses_archived_epub_without_a_second_download(tmp_path):
@@ -80,3 +94,12 @@ def test_newer_archived_version_is_linked_as_superseding_its_predecessor(tmp_pat
     second = ingest_title(client, archive, source, date(2026, 8, 8), include_pdf=False)
 
     assert any(relationship.type == "SUPERSEDED_BY" for relationship in second.graph.relationships.values())
+
+
+def test_backfill_uses_register_ids_to_preserve_distinct_historical_versions(tmp_path, monkeypatch):
+    client = BackfillClient()
+    monkeypatch.setattr("migration_law_ingestion.cli.RegisterApiClient", lambda **_: client)
+    results = backfill_title("T", tmp_path / "raw", tmp_path / "graph.json", source_kind="Act", version_limit=2, skip_pdf=True)
+
+    assert [result.version_id for result in results] == ["T-v1", "T-v2"]
+    assert client.downloads == 2

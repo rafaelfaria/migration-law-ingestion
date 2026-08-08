@@ -3,5 +3,7 @@
 *.egg-info/
 data/raw/
 data/graph.json
+data/source-registry.json
+data/backfill-graph.json
 __pycache__/
 *.py[cod]

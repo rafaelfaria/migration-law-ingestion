@@ -14,7 +14,8 @@ from typing import Any
 from .api import DownloadedDocument, RegisterApiClient
 from .archive import ArchivedObject, RawArchive
 from .model import Graph, Node, Provenance, Relationship
-from .parser import RegulationsParser
+from .neo4j_sink import write_graph_from_environment
+from .parser import GenericLegislationParser, RegulationsParser
 
 
 MIGRATION_REGULATIONS_TITLE_ID = "F1996B03551"
@@ -81,16 +82,18 @@ def _base_graph(title: dict[str, Any], version: dict[str, Any], source: SourceTi
 
 def _add_authority(graph: Graph, source: SourceTitle, title: dict[str, Any], provenance: Provenance) -> None:
     title_node = f"title:{source.title_id}"
-    authority_ids: set[str] = set()
+    authority_ids: dict[str, str | None] = {}
     if source.title_id == MIGRATION_REGULATIONS_TITLE_ID:
-        authority_ids.add(MIGRATION_ACT_TITLE_ID)
+        authority_ids[MIGRATION_ACT_TITLE_ID] = "s 504"
     for affect in title.get("authorisedBy") or []:
-        authority_ids.add(affect.get("affectingTitleId") or "")
-    for authority_id in authority_ids - {""}:
+        authority_id = affect.get("affectingTitleId")
+        if authority_id:
+            authority_ids[authority_id] = affect.get("affectingProvisions")
+    for authority_id, provisions in authority_ids.items():
         target = f"title:{authority_id}"
         if target not in graph.nodes:
             graph.add_node(Node(target, ("LegislationTitle",), {"title_id": authority_id, "resolved": authority_id == MIGRATION_ACT_TITLE_ID}, provenance))
-        graph.add_relationship(Relationship(f"rel:AUTHORISED_BY:{title_node}:{target}", "AUTHORISED_BY", title_node, target, {}, provenance))
+        graph.add_relationship(Relationship(f"rel:AUTHORISED_BY:{title_node}:{target}", "AUTHORISED_BY", title_node, target, {"affecting_provisions": provisions}, provenance))
 
 
 def _link_known_predecessor(graph: Graph, archive: RawArchive, source: SourceTitle, version: dict[str, Any], version_id: str, provenance: Provenance) -> None:
@@ -125,12 +128,13 @@ def ingest_title(
     client: RegisterApiClient,
     archive: RawArchive,
     source: SourceTitle,
-    as_at: date,
+    as_at: date | None,
     include_pdf: bool,
+    register_id: str | None = None,
 ) -> IngestResult:
     """Archive exactly the version selected by the Register and produce its graph."""
     title, title_url = client.get_title(source.title_id, include_authority=True)
-    version, version_url = client.get_version(source.title_id, as_at)
+    version, version_url = client.get_version_by_register_id(register_id) if register_id else client.get_version(source.title_id, as_at)
     version_id = version.get("registerId") or f"as-at-{as_at.isoformat()}"
     title_archive = archive.store_json(source.title_id, version_id, "title", title, title_url)
     version_archive = archive.store_json(source.title_id, version_id, "version", version, version_url)
@@ -139,8 +143,15 @@ def ingest_title(
 
     epub_path = archive.latest_document(source.title_id, version_id, ".epub")
     epub_object: ArchivedObject | None = None
+    def download(document_format: str, volume: int = 0) -> DownloadedDocument:
+        if register_id:
+            return client.download_primary_document_by_register_id(register_id, document_format, volume)
+        if as_at is None:
+            raise ValueError("as_at is required when register_id is not supplied")
+        return client.download_primary_document(source.title_id, as_at, document_format, volume)
+
     if _primary_documents(version, "Epub") and (changed or epub_path is None):
-        epub = client.download_primary_document(source.title_id, as_at, "Epub")
+        epub = download("Epub")
         epub_object = _archive_document(archive, source.title_id, version_id, epub, f"{version_id}.epub")
         entries.append(epub_object)
         epub_path = epub_object.path
@@ -149,7 +160,7 @@ def ingest_title(
     if include_pdf and (changed or not archive.latest_document(source.title_id, version_id, ".pdf")):
         for document in _primary_documents(version, "Pdf"):
             volume = document.get("volumeNumber", 0)
-            pdf = client.download_primary_document(source.title_id, as_at, "Pdf", volume)
+            pdf = download("Pdf", volume)
             entries.append(_archive_document(archive, source.title_id, version_id, pdf, f"{version_id}-v{volume}.pdf"))
 
     if changed:
@@ -162,9 +173,9 @@ def ingest_title(
         provenance = Provenance(source.title_id, version_id, epub_path.name, str(epub_path), "", version.get("start"), version.get("end"), retrieved_at, source_hash, "0.1.0", "register-epub", 1.0)
         if source.title_id == MIGRATION_REGULATIONS_TITLE_ID:
             graph = RegulationsParser().parse_epub(epub_bytes, title_id=source.title_id, version_id=version_id, effective_from=version.get("start"), effective_to=version.get("end"), retrieved_at=retrieved_at, source_hash=source_hash)
-            graph.merge(_base_graph(title, version, source, provenance))
         else:
-            graph = _base_graph(title, version, source, provenance)
+            graph = GenericLegislationParser().parse_epub(epub_bytes, title_id=source.title_id, version_id=version_id, effective_from=version.get("start"), effective_to=version.get("end"), retrieved_at=retrieved_at, source_hash=source_hash)
+        graph.merge(_base_graph(title, version, source, provenance))
     else:
         provenance = Provenance(source.title_id, version_id, "register-api", version_url, "", version.get("start"), version.get("end"), version_archive.retrieved_at, version_archive.sha256, "0.1.0", "register-version-json", 1.0)
         graph = _base_graph(title, version, source, provenance)
@@ -174,18 +185,21 @@ def ingest_title(
 
 
 def discover_migration_instruments(client: RegisterApiClient, limit: int | None = None) -> list[SourceTitle]:
-    """Discover current principal migration instruments from the Register catalogue."""
+    """Discover only candidate instruments authorised by the Act or Regulations."""
     candidates, _ = client.list_in_force_migration_titles()
-    instruments = [
-        SourceTitle(title["id"], "LegislativeInstrument", title.get("name"))
-        for title in candidates
-        if title.get("id") != MIGRATION_REGULATIONS_TITLE_ID
-        and title.get("collection") == "LegislativeInstrument"
-        and title.get("isPrincipal") is True
-        # Catalogue text search also catches unrelated terms such as aircraft fuel
-        # migration. Keep Phase 1's title-only discovery boundary conservative.
-        and re.match(r"^Migration(?:\s|\(|$)", title.get("name") or "", re.I)
-    ]
+    instruments = []
+    for candidate in candidates:
+        if (
+            candidate.get("id") == MIGRATION_REGULATIONS_TITLE_ID
+            or candidate.get("collection") != "LegislativeInstrument"
+            or candidate.get("isPrincipal") is not True
+            or not re.match(r"^Migration(?:\s|\(|$)", candidate.get("name") or "", re.I)
+        ):
+            continue
+        title, _ = client.get_title(candidate["id"], include_authority=True)
+        authorities = {affect.get("affectingTitleId") for affect in title.get("authorisedBy") or []}
+        if authorities & {MIGRATION_ACT_TITLE_ID, MIGRATION_REGULATIONS_TITLE_ID}:
+            instruments.append(SourceTitle(candidate["id"], "LegislativeInstrument", title.get("name")))
     instruments.sort(key=lambda item: item.title_id)
     return instruments if limit is None else instruments[:limit]
 
@@ -197,8 +211,8 @@ def baseline_sources(client: RegisterApiClient, include_instruments: bool, instr
     return sources
 
 
-def ingest_baseline(as_at: date, archive_root: Path, output: Path, include_instruments: bool = False, instrument_limit: int | None = None, skip_pdf: bool = False) -> list[IngestResult]:
-    client = RegisterApiClient()
+def ingest_baseline(as_at: date, archive_root: Path, output: Path, include_instruments: bool = False, instrument_limit: int | None = None, skip_pdf: bool = False, neo4j: bool = False, request_interval: float = 0.75) -> list[IngestResult]:
+    client = RegisterApiClient(request_interval_seconds=request_interval)
     archive = RawArchive(archive_root)
     graph = Graph()
     results = []
@@ -206,21 +220,71 @@ def ingest_baseline(as_at: date, archive_root: Path, output: Path, include_instr
         result = ingest_title(client, archive, source, as_at, include_pdf=not skip_pdf)
         results.append(result)
         graph.merge(result.graph)
+    graph.validate()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(graph.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    registry = {
+        "as_at": as_at.isoformat(),
+        "selection": "Migration Act 1958 and Migration Regulations 1994; plus current principal Migration instruments authorised by either root" if include_instruments else "Migration Act 1958 and Migration Regulations 1994",
+        "titles": [{"title_id": result.source.title_id, "kind": result.source.kind, "name": result.source.name, "version_id": result.version_id} for result in results],
+    }
+    output.with_name("source-registry.json").write_text(json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if neo4j:
+        write_graph_from_environment(graph)
     return results
 
 
-def ingest_regulations(as_at: date, archive_root: Path, output: Path, skip_pdf: bool = False) -> None:
+def backfill_title(
+    title_id: str,
+    archive_root: Path,
+    output: Path,
+    source_kind: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    version_limit: int | None = None,
+    skip_pdf: bool = False,
+    neo4j: bool = False,
+    request_interval: float = 0.75,
+) -> list[IngestResult]:
+    """Backfill Register versions without pretending a later compilation is historical text."""
+    client = RegisterApiClient(request_interval_seconds=request_interval)
+    archive = RawArchive(archive_root)
+    kind = source_kind or ("Act" if title_id == MIGRATION_ACT_TITLE_ID else "Regulations" if title_id == MIGRATION_REGULATIONS_TITLE_ID else "LegislativeInstrument")
+    source = SourceTitle(title_id, kind)
+    versions = client.list_versions(title_id)
+    selected = [
+        version for version in versions
+        if version.get("registerId")
+        and (from_date is None or date.fromisoformat(version["start"][:10]) >= from_date)
+        and (to_date is None or date.fromisoformat(version["start"][:10]) <= to_date)
+    ]
+    if version_limit is not None:
+        selected = selected[:version_limit]
+    graph = Graph()
+    results = []
+    for version in selected:
+        result = ingest_title(client, archive, source, None, include_pdf=not skip_pdf, register_id=version["registerId"])
+        graph.merge(result.graph)
+        results.append(result)
+    graph.validate()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(graph.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if neo4j:
+        write_graph_from_environment(graph)
+    return results
+
+
+def ingest_regulations(as_at: date, archive_root: Path, output: Path, skip_pdf: bool = False, request_interval: float = 0.75) -> None:
     """Compatibility command retained for the focused Subclass 102 acceptance slice."""
-    client = RegisterApiClient()
+    client = RegisterApiClient(request_interval_seconds=request_interval)
     result = ingest_title(client, RawArchive(archive_root), SourceTitle(MIGRATION_REGULATIONS_TITLE_ID, "Regulations"), as_at, include_pdf=not skip_pdf)
+    result.graph.validate()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result.graph.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def check_updates(as_at: date, archive_root: Path, include_instruments: bool, instrument_limit: int | None) -> list[dict[str, str | bool]]:
-    client = RegisterApiClient()
+def check_updates(as_at: date, archive_root: Path, include_instruments: bool, instrument_limit: int | None, request_interval: float = 0.75) -> list[dict[str, str | bool]]:
+    client = RegisterApiClient(request_interval_seconds=request_interval)
     archive = RawArchive(archive_root)
     updates = []
     for source in baseline_sources(client, include_instruments, instrument_limit):
@@ -238,6 +302,7 @@ def check_updates(as_at: date, archive_root: Path, include_instruments: bool, in
 def _add_common_arguments(command: argparse.ArgumentParser, include_instruments: bool = False) -> None:
     command.add_argument("--as-at", required=True, type=_as_date)
     command.add_argument("--archive-root", type=Path, default=Path("data/raw"))
+    command.add_argument("--request-interval", type=float, default=0.75, help="minimum seconds between Register API requests")
     if include_instruments:
         command.add_argument("--include-instruments", action="store_true", help="discover current principal migration instruments from the Register")
         command.add_argument("--instrument-limit", type=int, default=None, help="cap discovered instruments for a bounded run")
@@ -254,16 +319,31 @@ def main() -> None:
     _add_common_arguments(baseline, include_instruments=True)
     baseline.add_argument("--output", type=Path, default=Path("data/graph.json"))
     baseline.add_argument("--skip-pdf", action="store_true")
+    baseline.add_argument("--neo4j", action="store_true", help="upsert the validated graph using NEO4J_* environment variables")
+    backfill = command.add_parser("backfill-title", help="archive and parse a title's available historical Register versions")
+    backfill.add_argument("--title-id", required=True)
+    backfill.add_argument("--kind", choices=("Act", "Regulations", "LegislativeInstrument"))
+    backfill.add_argument("--from-date", type=_as_date)
+    backfill.add_argument("--to-date", type=_as_date)
+    backfill.add_argument("--version-limit", type=int)
+    backfill.add_argument("--archive-root", type=Path, default=Path("data/raw"))
+    backfill.add_argument("--output", type=Path, default=Path("data/backfill-graph.json"))
+    backfill.add_argument("--skip-pdf", action="store_true")
+    backfill.add_argument("--neo4j", action="store_true")
+    backfill.add_argument("--request-interval", type=float, default=0.75)
     updates = command.add_parser("check-updates", help="report versions not yet present in the immutable archive")
     _add_common_arguments(updates, include_instruments=True)
     args = parser.parse_args()
     if args.command == "ingest-regulations":
-        ingest_regulations(args.as_at, args.archive_root, args.output, args.skip_pdf)
+        ingest_regulations(args.as_at, args.archive_root, args.output, args.skip_pdf, args.request_interval)
     elif args.command == "ingest-baseline":
-        results = ingest_baseline(args.as_at, args.archive_root, args.output, args.include_instruments, args.instrument_limit, args.skip_pdf)
+        results = ingest_baseline(args.as_at, args.archive_root, args.output, args.include_instruments, args.instrument_limit, args.skip_pdf, args.neo4j, args.request_interval)
         print(json.dumps({"ingested": len(results), "changed": sum(result.changed for result in results)}, indent=2))
     elif args.command == "check-updates":
-        print(json.dumps(check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit), indent=2))
+        print(json.dumps(check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit, args.request_interval), indent=2))
+    elif args.command == "backfill-title":
+        results = backfill_title(args.title_id, args.archive_root, args.output, args.kind, args.from_date, args.to_date, args.version_limit, args.skip_pdf, args.neo4j, args.request_interval)
+        print(json.dumps({"ingested": len(results), "changed": sum(result.changed for result in results)}, indent=2))
 
 
 if __name__ == "__main__":
