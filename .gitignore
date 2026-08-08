@@ -7,5 +7,7 @@ data/graph.json
 data/source-registry.json
 data/backfill-graph.json
 data/backfill/
+data/daily-ingestion.log
+data-backup-manifest.sha256
 __pycache__/
 *.py[cod]

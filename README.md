@@ -8,9 +8,24 @@ versioned legal graph.  Phase 1 is intentionally narrow:
   (`F1996B03551`), and registered migration legislative instruments;
 - immutable archive of API metadata and EPUB/PDF source files;
 - deterministic structure and reference extraction; and
-- a canonical graph export, with Neo4j deliberately left as an optional sink.
+- a canonical graph export, persisted to Neo4j Aura for the operational run.
 
 It does not ingest policy, case law, Departmental guidance, or use an LLM.
+
+## Documentation map
+
+| Document | Purpose |
+| --- | --- |
+| [Foundation](docs/foundation.md) | Vision, ontology, relationship semantics, source architecture and update strategy. |
+| [ADR-001](docs/adr/001-locked-ingestion-architecture.md) | The locked source, identity, provenance and parser decisions. |
+| [Operations](docs/operations.md) | Commands, scheduling, verification and incident handling. |
+| [Backup and recovery](docs/backup-and-recovery.md) | What to retain, where to retain it, and how to restore a working ingestion state. |
+| [Verification record](docs/verification.md) | Baseline acceptance evidence and repeatable checks. |
+| [UI hand-off](docs/ui-handoff.md) | The safe read-only boundary and initial product slice for a future interface. |
+
+The source archive and runtime state are intentionally **not** in Git. Git holds
+the implementation and documentation; the archive belongs in persistent,
+versioned backup storage. See [Backup and recovery](docs/backup-and-recovery.md).
 
 ## Quick start
 
@@ -102,14 +117,14 @@ the normal test suite fast and offline.
 - `src/migration_law_ingestion/archive.py` — content-addressed raw archive
 - `src/migration_law_ingestion/parser.py` — EPUB structure and reference parser
 - `src/migration_law_ingestion/model.py` — portable canonical graph model
-- `src/migration_law_ingestion/neo4j_sink.py` — optional, batched Neo4j upsert
+- `src/migration_law_ingestion/neo4j_sink.py` — batched Neo4j upsert
 - `tests/` — deterministic acceptance and archive tests
 
-Neo4j is an integration boundary, not a current prerequisite. A future sink can
-upsert the `Graph` nodes and relationships by their stable IDs without changing
-retrieval, archival, or extraction.
+Neo4j is an integration boundary rather than the canonical parser output. The
+portable JSON graph is written before the Neo4j upsert, so retrieval, archival
+and deterministic extraction remain independently reproducible.
 
-## Optional Neo4j persistence
+## Neo4j persistence
 
 The canonical JSON export is always written first. To also upsert the validated
 graph into Neo4j, install the optional dependency and provide connection variables:

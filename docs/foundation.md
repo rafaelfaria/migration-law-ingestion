@@ -106,7 +106,7 @@ flowchart LR
   PDF --> ARCHIVE
   ARCHIVE --> PARSER["Deterministic structure + citation parser"]
   PARSER --> GRAPH["Canonical versioned graph JSON"]
-  GRAPH -. optional, later .-> NEO["Neo4j sink"]
+  GRAPH --> NEO["Neo4j sink"]
 ```
 
 The API client calls the documented `Titles`, `versions/find`, and
@@ -136,9 +136,9 @@ EPUB; it therefore does not need the network or a mutable source page.
 5. Preserve `hasUnincorporatedAmendments`, version reasons and future/status
    metadata. An amendment is not treated as operative merely because it is
    registered or listed “in force”.
-6. Run deterministic regression tests, beginning with Subclass 102, then publish
-   the graph output. A future Neo4j upsert consumes this output without changing
-   archival or parsing.
+6. Run deterministic regression tests, beginning with Subclass 102, publish the
+   graph output, then upsert that validated output into Neo4j. The portable graph
+   export remains the system-of-record boundary between parser and sink.
 
 The runnable local equivalent of that loop is `scripts/daily_ingestion.py`. It is
 the artifact to place in a future scheduled container/job; its persistent
@@ -172,3 +172,17 @@ uses an LLM or turns ambiguous wording into an inferred legal relationship.
 This strategy favours completeness and reproducibility over premature incremental
 diffing. Once version ingestion is reliable, document-level hashes can avoid
 unnecessary re-parsing without weakening the archive.
+
+## 6. Operational boundary
+
+The ingestion code is complete for the Phase 1 source boundary. Its ongoing work
+is operational rather than architectural: retain the raw archive on durable,
+versioned storage; run one non-overlapping daily update; preserve logs and
+receipts; and back up the Neo4j graph or retain the ability to regenerate it from
+the archive. These requirements and the recovery procedure are documented in
+[Operations](operations.md) and [Backup and recovery](backup-and-recovery.md).
+
+A user interface is a separate read-only consumer of the persisted graph. It
+must not access the Federal Register or Neo4j Aura directly from a browser, and
+it must not alter archival or parser rules. Its approved hand-off boundary is in
+[UI hand-off](ui-handoff.md).
