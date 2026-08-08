@@ -54,7 +54,11 @@ def write_graph(driver: Any, graph: Graph, database: str | None = None) -> None:
             nodes_by_labels[tuple(sorted(labels))].append({"id": node.id, "properties": _properties(node)})
         for labels, rows in nodes_by_labels.items():
             label_clause = ":".join(labels)
-            query = f"UNWIND $rows AS row MERGE (n:Entity:{label_clause} {{id: row.id}}) SET n += row.properties"
+            # Identity is independent of the labels currently known for a node.
+            # An amendment can create a title reference before that same title is
+            # later ingested as a LegislativeInstrument. Merge on Entity/id, then
+            # enrich its legal labels without attempting a duplicate node.
+            query = f"UNWIND $rows AS row MERGE (n:Entity {{id: row.id}}) SET n:{label_clause} SET n += row.properties"
             for start in range(0, len(rows), BATCH_SIZE):
                 session.execute_write(lambda tx, q=query, batch=rows[start:start + BATCH_SIZE]: tx.run(q, rows=batch).consume())
         relationships_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
