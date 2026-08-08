@@ -384,10 +384,26 @@ def backfill_baseline(
     archive_root.mkdir(parents=True, exist_ok=True)
     output_root.mkdir(parents=True, exist_ok=True)
     state_path = output_root / "backfill-state.json"
+    catalogue_path = output_root / "historical-source-registry.json"
     state: dict[str, Any] = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"completed_title_ids": []}
     completed = set(state.get("completed_title_ids", []))
     summaries: list[dict[str, Any]] = []
-    for source in historical_sources(client, instrument_limit):
+    if catalogue_path.exists():
+        catalogue = json.loads(catalogue_path.read_text(encoding="utf-8"))
+        sources = [SourceTitle(**entry) for entry in catalogue["sources"]]
+    else:
+        sources = historical_sources(client, instrument_limit)
+        catalogue_path.write_text(
+            json.dumps(
+                {
+                    "selection": "Migration Act 1958, Migration Regulations 1994, and principal Migration instruments authorised by either root, including former titles",
+                    "sources": [source.__dict__ for source in sources],
+                },
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    for source in sources:
         if source.title_id in completed and not reprocess_complete:
             summaries.append({"title_id": source.title_id, "status": "already-complete"})
             continue
