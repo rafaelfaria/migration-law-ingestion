@@ -1,0 +1,7 @@
+.venv/
+.pytest_cache/
+*.egg-info/
+data/raw/
+data/graph.json
+__pycache__/
+*.py[cod]
