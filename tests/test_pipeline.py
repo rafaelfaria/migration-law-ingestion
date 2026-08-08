@@ -168,6 +168,15 @@ def test_historical_row_without_register_id_is_retained_as_metadata(tmp_path):
     assert version.provenance.extraction_method == "register-version-metadata-only"
 
 
+def test_as_at_ingestion_uses_requested_identity_when_register_version_has_no_id(tmp_path):
+    client = FakeClient()
+    client.get_version = lambda title_id, as_at: ({"start": "2026-08-08T00:00:00", "end": None, "documents": [], "reasons": []}, "https://example.test/version")
+    result = ingest_title(client, RawArchive(tmp_path / "raw"), SourceTitle("T", "Act"), date(2026, 8, 9), include_pdf=False)
+
+    assert result.version_id == "as-at-2026-08-09"
+    assert "version:T:as-at-2026-08-09" in result.graph.nodes
+
+
 def test_newer_archived_version_is_linked_as_superseding_its_predecessor(tmp_path):
     client = VersioningClient()
     archive = RawArchive(tmp_path / "raw")

@@ -230,10 +230,10 @@ def ingest_title(
             graph = RegulationsParser().parse_epub(epub_bytes, title_id=source.title_id, version_id=version_id, effective_from=version.get("start"), effective_to=version.get("end"), retrieved_at=retrieved_at, source_hash=source_hash)
         else:
             graph = GenericLegislationParser().parse_epub(epub_bytes, title_id=source.title_id, version_id=version_id, effective_from=version.get("start"), effective_to=version.get("end"), retrieved_at=retrieved_at, source_hash=source_hash)
-        graph.merge(_base_graph(title, version, source, provenance))
+        graph.merge(_base_graph(title, version, source, provenance, canonical_version_id=version_id))
     else:
         provenance = Provenance(source.title_id, version_id, "register-api", version_url, "", version.get("start"), version.get("end"), version_archive.retrieved_at, version_archive.sha256, "0.1.0", "register-version-json", 1.0)
-        graph = _base_graph(title, version, source, provenance)
+        graph = _base_graph(title, version, source, provenance, canonical_version_id=version_id)
     _add_authority(graph, source, title, provenance)
     _link_known_predecessor(graph, archive, source, version, version_id, provenance)
     return IngestResult(source, version_id, graph, changed)
