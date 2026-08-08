@@ -15,6 +15,7 @@ from migration_law_ingestion.cli import (
     ingest_title,
     historical_sources,
     ingest_version_metadata,
+    check_updates,
 )
 from migration_law_ingestion.cli import _base_graph
 from migration_law_ingestion.model import Provenance
@@ -175,6 +176,25 @@ def test_as_at_ingestion_uses_requested_identity_when_register_version_has_no_id
 
     assert result.version_id == "as-at-2026-08-09"
     assert "version:T:as-at-2026-08-09" in result.graph.nodes
+
+
+def test_update_check_requires_a_successful_baseline_receipt(tmp_path, monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("migration_law_ingestion.cli.RegisterApiClient", lambda **_: client)
+    archive = RawArchive(tmp_path / "raw")
+    output = tmp_path / "graph.json"
+    entries = []
+    for title_id in (MIGRATION_ACT_TITLE_ID, MIGRATION_REGULATIONS_TITLE_ID):
+        title, title_url = client.get_title(title_id, include_authority=True)
+        version, version_url = client.get_version(title_id, date(2026, 8, 8))
+        archive.store_json(title_id, version["registerId"], "title", title, title_url)
+        archive.store_json(title_id, version["registerId"], "version", version, version_url)
+        entries.append({"title_id": title_id, "version_id": version["registerId"]})
+    output.with_name("source-registry.json").write_text(__import__("json").dumps({"titles": entries}), encoding="utf-8")
+
+    assert not any(item["changed"] for item in check_updates(date(2026, 8, 8), tmp_path / "raw", False, None, output=output))
+    output.with_name("source-registry.json").unlink()
+    assert all(item["changed"] for item in check_updates(date(2026, 8, 8), tmp_path / "raw", False, None, output=output))
 
 
 def test_newer_archived_version_is_linked_as_superseding_its_predecessor(tmp_path):

@@ -298,14 +298,14 @@ def ingest_baseline(as_at: date, archive_root: Path, output: Path, include_instr
     graph.validate()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(graph.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if neo4j:
+        write_graph_from_environment(graph)
     registry = {
         "as_at": as_at.isoformat(),
         "selection": "Migration Act 1958 and Migration Regulations 1994; plus current principal Migration instruments authorised by either root" if include_instruments else "Migration Act 1958 and Migration Regulations 1994",
         "titles": [{"title_id": result.source.title_id, "kind": result.source.kind, "name": result.source.name, "version_id": result.version_id} for result in results],
     }
     output.with_name("source-registry.json").write_text(json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    if neo4j:
-        write_graph_from_environment(graph)
     return results
 
 
@@ -449,9 +449,27 @@ def ingest_regulations(as_at: date, archive_root: Path, output: Path, skip_pdf: 
     output.write_text(json.dumps(result.graph.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def check_updates(as_at: date, archive_root: Path, include_instruments: bool, instrument_limit: int | None, request_interval: float = 0.75) -> list[dict[str, str | bool]]:
+def check_updates(
+    as_at: date,
+    archive_root: Path,
+    include_instruments: bool,
+    instrument_limit: int | None,
+    request_interval: float = 0.75,
+    output: Path = Path("data/graph.json"),
+) -> list[dict[str, str | bool]]:
+    """Report source changes or an incomplete prior baseline transaction.
+
+    Raw objects may already exist when a later parser or Neo4j step fails. The
+    source registry is therefore a success receipt written only after graph
+    validation and (when selected) Neo4j persistence complete.
+    """
     client = RegisterApiClient(request_interval_seconds=request_interval)
     archive = RawArchive(archive_root)
+    registry_path = output.with_name("source-registry.json")
+    successful_versions: dict[str, str] = {}
+    if registry_path.exists():
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        successful_versions = {entry["title_id"]: entry["version_id"] for entry in registry.get("titles", [])}
     updates = []
     for source in baseline_sources(client, include_instruments, instrument_limit):
         title, _ = client.get_title(source.title_id, include_authority=True)
@@ -460,7 +478,7 @@ def check_updates(as_at: date, archive_root: Path, include_instruments: bool, in
         changed = not (
             archive.has_json_payload(source.title_id, version_id, "title", title)
             and archive.has_json_payload(source.title_id, version_id, "version", version)
-        )
+        ) or successful_versions.get(source.title_id) != version_id
         updates.append({"title_id": source.title_id, "version_id": version_id, "changed": changed})
     return updates
 
@@ -509,6 +527,7 @@ def main() -> None:
     full_backfill.add_argument("--reprocess-complete", action="store_true", help="re-run completed titles while reusing immutable source files")
     updates = command.add_parser("check-updates", help="report versions not yet present in the immutable archive")
     _add_common_arguments(updates, include_instruments=True)
+    updates.add_argument("--output", type=Path, default=Path("data/graph.json"))
     args = parser.parse_args()
     if args.command == "ingest-regulations":
         ingest_regulations(args.as_at, args.archive_root, args.output, args.skip_pdf, args.request_interval)
@@ -516,7 +535,7 @@ def main() -> None:
         results = ingest_baseline(args.as_at, args.archive_root, args.output, args.include_instruments, args.instrument_limit, args.skip_pdf, args.neo4j, args.request_interval)
         print(json.dumps({"ingested": len(results), "changed": sum(result.changed for result in results)}, indent=2))
     elif args.command == "check-updates":
-        print(json.dumps(check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit, args.request_interval), indent=2))
+        print(json.dumps(check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit, args.request_interval, args.output), indent=2))
     elif args.command == "backfill-title":
         results = backfill_title(args.title_id, args.archive_root, args.output, args.kind, args.from_date, args.to_date, args.version_limit, args.skip_pdf, args.neo4j, args.request_interval)
         print(json.dumps({"ingested": len(results), "changed": sum(result.changed for result in results)}, indent=2))

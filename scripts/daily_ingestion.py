@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument("--neo4j", action="store_true")
     parser.add_argument("--request-interval", type=float, default=0.75)
     args = parser.parse_args()
-    updates = check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit, args.request_interval)
+    updates = check_updates(args.as_at, args.archive_root, args.include_instruments, args.instrument_limit, args.request_interval, args.output)
     if not any(item["changed"] for item in updates):
         print("No Register changes detected.")
         return
