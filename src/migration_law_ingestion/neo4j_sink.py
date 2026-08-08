@@ -58,6 +58,11 @@ def write_graph(driver: Any, graph: Graph, database: str | None = None) -> None:
 
 def write_graph_from_environment(graph: Graph) -> None:
     """Connect only when the caller expressly requests Neo4j persistence."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError("install the 'neo4j' extra before enabling Neo4j persistence") from error
+    load_dotenv()
     uri = os.environ.get("NEO4J_URI")
     user = os.environ.get("NEO4J_USER")
     password = os.environ.get("NEO4J_PASSWORD")

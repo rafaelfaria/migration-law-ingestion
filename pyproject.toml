@@ -11,7 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-neo4j = ["neo4j>=5.18"]
+neo4j = ["neo4j>=5.18", "python-dotenv>=1.0"]
 
 [project.scripts]
 migration-law-ingest = "migration_law_ingestion.cli:main"

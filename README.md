@@ -116,12 +116,16 @@ graph into Neo4j, install the optional dependency and provide connection variabl
 
 ```bash
 .venv/bin/python -m pip install -e '.[neo4j]'
-export NEO4J_URI='neo4j+s://…'
-export NEO4J_USER='neo4j'
-export NEO4J_PASSWORD='…'
-# Optional: export NEO4J_DATABASE='neo4j'
 .venv/bin/python -m migration_law_ingestion.cli ingest-baseline \
   --as-at 2026-08-08 --include-instruments --neo4j
+```
+
+Create a private `.env` file in the repository root by copying `.env.example`,
+then enter the connection values from Aura. `.env` is ignored by Git and is loaded
+only when `--neo4j` is used:
+
+```bash
+cp .env.example .env
 ```
 
 The source archive and parser do not depend on these credentials. The writer uses
