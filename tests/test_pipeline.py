@@ -131,6 +131,26 @@ def test_multiple_amendment_reasons_from_one_title_remain_distinct():
     assert sum(rel.type == "AMENDED_BY" for rel in graph.relationships.values()) == 2
 
 
+def test_repeated_amendment_title_with_inconsistent_display_name_is_idempotent():
+    source = SourceTitle("T", "Act")
+    provenance = Provenance("T", "V", "version.json", "test", "", None, None, "2026-01-01T00:00:00Z", "hash", "test", "test", 1.0)
+    graph = _base_graph(
+        {"name": "Test"},
+        {
+            "registerId": "V",
+            "reasons": [
+                {"affectedByTitle": {"titleId": "A", "name": "First name", "provisions": "item 1"}},
+                {"affectedByTitle": {"titleId": "A", "name": "Second name", "provisions": "item 2"}},
+            ],
+        },
+        source,
+        provenance,
+    )
+
+    assert graph.nodes["title:A"].properties["name"] == "First name"
+    assert sum(rel.type == "AMENDED_BY" for rel in graph.relationships.values()) == 2
+
+
 def test_historical_row_without_register_id_is_retained_as_metadata(tmp_path):
     archive = RawArchive(tmp_path / "raw")
     source = SourceTitle("T", "Act")

@@ -75,7 +75,14 @@ def _base_graph(title: dict[str, Any], version: dict[str, Any], source: SourceTi
         amendment_title = affected.get("titleId")
         if amendment_title:
             amendment = f"title:{amendment_title}"
-            graph.add_node(Node(amendment, ("LegislationTitle",), {"title_id": amendment_title, "name": affected.get("name")}, provenance))
+            # Register reason rows can repeat the same title with a different
+            # optional display name. The legal identity is the title ID; retain
+            # the first non-empty name and add all distinct amendment reasons.
+            existing = graph.nodes.get(amendment)
+            if existing is None:
+                graph.add_node(Node(amendment, ("LegislationTitle",), {"title_id": amendment_title, "name": affected.get("name")}, provenance))
+            elif not existing.properties.get("name") and affected.get("name"):
+                graph.nodes[amendment] = Node(amendment, existing.labels, existing.properties | {"name": affected.get("name")}, existing.provenance)
             provisions = affected.get("provisions")
             reason_key = hashlib.sha256(json.dumps(provisions, sort_keys=True).encode("utf-8")).hexdigest()[:12]
             graph.add_relationship(Relationship(f"rel:AMENDED_BY:{version_node}:{amendment}:{reason_key}", "AMENDED_BY", version_node, amendment, {"provisions": provisions}, provenance))
